@@ -8,10 +8,17 @@ use serde_json::Value;
 
 use crate::protocol::{DecodedFrame, ProtocolCommand, ProtocolType};
 
+mod address;
+mod error;
+#[cfg(any(target_os = "windows", test))]
+mod exchange;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "windows")]
-mod windows;
+pub(crate) mod windows;
+
+pub use address::{bth_addr_to_mac, mac_to_bth_addr, parse_mac};
+pub use error::TransportError;
 
 #[cfg(target_os = "linux")]
 pub use linux::LinuxTransport;

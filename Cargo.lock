@@ -355,6 +355,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "log",
  "serde",
  "serde_json",
  "ugreen-core",
@@ -366,8 +367,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "libc",
+ "log",
  "serde",
  "serde_json",
+ "windows-sys",
 ]
 
 [[package]]

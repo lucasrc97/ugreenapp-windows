@@ -1,3 +1,5 @@
+mod logger;
+
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
@@ -5,6 +7,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::io::{self, Write};
+use ugreen_core::discovery;
 use ugreen_core::protocol::{DecodedFrame, FeatureSupport, ProtocolCommand, ProtocolType};
 use ugreen_core::transport::{PlatformTransport, Transport, TransportTarget};
 
@@ -12,6 +15,7 @@ const MAX_LOGS: usize = 200;
 
 fn main() -> Result<()> {
     let args = AppArgs::parse();
+    logger::init(args.verbose);
     let mut state = AppState::new();
 
     if let Some(command) = args.command {
@@ -49,10 +53,16 @@ fn repl(state: &mut AppState) -> Result<()> {
             continue;
         }
 
-        if let Some(parsed) = parse_inline_command(trimmed)
-            && let Err(error) = run_command(parsed.command, state, parsed.json)
-        {
-            eprintln!("Error: {error}");
+        if let Some(parsed) = parse_inline_command(trimmed) {
+            // `--verbose` on a REPL line applies to that line only.
+            let session_level = log::max_level();
+            if parsed.verbose {
+                log::set_max_level(logger::level_for(true));
+            }
+            if let Err(error) = run_command(parsed.command, state, parsed.json) {
+                eprintln!("Error: {error}");
+            }
+            log::set_max_level(session_level);
         }
     }
 
@@ -62,6 +72,7 @@ fn repl(state: &mut AppState) -> Result<()> {
 struct ParsedInlineCommand {
     command: Command,
     json: bool,
+    verbose: bool,
 }
 
 fn parse_inline_command(line: &str) -> Option<ParsedInlineCommand> {
@@ -78,6 +89,7 @@ fn parse_inline_command(line: &str) -> Option<ParsedInlineCommand> {
         Ok(parsed) => parsed.command.map(|command| ParsedInlineCommand {
             command,
             json: parsed.json,
+            verbose: parsed.verbose,
         }),
         Err(err) => {
             eprintln!("{err}");
@@ -107,12 +119,14 @@ fn print_help() {
     );
     println!("  Device aliases: `max5c`, `max6`, `h6pro`, `t6`.");
     println!("  Add `--json` to any command, for example: `scan --json`, `info --json`.");
+    println!("  Add `--verbose` to see the raw bytes exchanged with the headset.");
     println!("  `factory-reset` is blocked unless you pass `--yes-really-reset-device`.");
     println!();
     println!("Commands:");
     println!("  scan | stop-scan | status");
     println!("  connect <device> | disconnect");
     println!("  info | fw");
+    println!("  services   (list the headset's RFCOMM channels via SDP; Windows only)");
     println!("  anc <off|transparency|light|medium|deep|adaptive>");
     println!("  eq <bass|pop|classic|jazz|electronic|folk|rock|treble>");
     println!("  lang <english|chinese>");
@@ -142,6 +156,9 @@ struct AppArgs {
     /// Print full JSON state after the command
     #[arg(long, global = true)]
     json: bool,
+    /// Log debug details (raw bytes sent/received) to stderr
+    #[arg(long, short, global = true)]
+    verbose: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -172,6 +189,9 @@ enum Command {
     /// Fetch firmware/hardware details
     #[command(visible_aliases = ["fw", "qf"])]
     QueryFirmware,
+    /// List the RFCOMM services the device advertises over SDP (Windows only)
+    #[command(visible_alias = "sdp")]
+    Services,
     /// Update ANC mode (optionally depth)
     #[command(visible_alias = "anc")]
     SetAnc {
@@ -243,6 +263,7 @@ impl Command {
             self,
             Command::QueryInfo
                 | Command::QueryFirmware
+                | Command::Services
                 | Command::SetAnc { .. }
                 | Command::SetEq { .. }
                 | Command::SetPromptLanguage { .. }
@@ -259,7 +280,13 @@ impl Command {
     fn execute(&self, state: &mut AppState) -> Result<()> {
         match self {
             Command::Scan => {
-                state.refresh_devices();
+                // On Windows the list is real or empty, so a failed lookup
+                // (Bluetooth off, nothing paired) is the answer to `scan`.
+                if let Err(error) = state.refresh_devices()
+                    && !USE_DEMO_CATALOG
+                {
+                    return Err(error);
+                }
                 state.scanning = true;
                 state.log(
                     "info",
@@ -281,8 +308,18 @@ impl Command {
                 let position = state
                     .devices
                     .iter()
-                    .position(|item| item.id == resolved_device_id)
-                    .ok_or_else(|| anyhow!("Device `{resolved_device_id}` not found"))?;
+                    .position(|item| item.id.eq_ignore_ascii_case(resolved_device_id))
+                    .or_else(|| {
+                        // The alias names a model, not one fixed address: pick
+                        // the detected device of that model.
+                        let model = alias_model_key(device_id)?;
+                        state.devices.iter().position(|item| {
+                            normalize_device_name(&item.device_name).contains(model)
+                        })
+                    })
+                    .ok_or_else(|| {
+                        anyhow!("Device `{device_id}` not found; run `scan` to list devices")
+                    })?;
                 let device_name = state.devices[position].device_name.clone();
                 let device_id_owned = state.devices[position].id.clone();
 
@@ -300,6 +337,25 @@ impl Command {
             Command::QueryInfo => state.apply_protocol_command(ProtocolCommand::QueryInfo)?,
             Command::QueryFirmware => {
                 state.apply_protocol_command(ProtocolCommand::QueryFirmware)?
+            }
+            Command::Services => {
+                let device = state.require_active_device()?;
+                let services = discovery::rfcomm_services(&device.mac_address)?;
+                println!(
+                    "RFCOMM services on {} ({}):",
+                    device.device_name, device.mac_address
+                );
+                if services.is_empty() {
+                    println!("  none reported");
+                }
+                for service in services {
+                    println!(
+                        "  channel {:>2}  {:<12} {}",
+                        service.channel,
+                        service.profile.unwrap_or("-"),
+                        service.name
+                    );
+                }
             }
             Command::SetAnc { mode, depth } => {
                 state.apply_protocol_command(ProtocolCommand::SetAnc {
@@ -356,7 +412,7 @@ struct AppState {
 impl AppState {
     fn new() -> Self {
         Self {
-            devices: detect_devices().unwrap_or_else(|_| supported_devices()),
+            devices: detect_devices().unwrap_or_else(|_| fallback_devices()),
             scanning: false,
             connected: false,
             active_device_id: None,
@@ -365,9 +421,18 @@ impl AppState {
         }
     }
 
-    fn refresh_devices(&mut self) {
-        if let Ok(devices) = detect_devices() {
-            self.devices = devices;
+    fn refresh_devices(&mut self) -> Result<()> {
+        match detect_devices() {
+            Ok(devices) => {
+                self.devices = devices;
+                Ok(())
+            }
+            Err(error) => {
+                if !USE_DEMO_CATALOG {
+                    self.devices.clear();
+                }
+                Err(error)
+            }
         }
     }
 
@@ -376,7 +441,11 @@ impl AppState {
             return Ok(());
         }
 
-        self.refresh_devices();
+        if let Err(error) = self.refresh_devices()
+            && !USE_DEMO_CATALOG
+        {
+            return Err(error);
+        }
         let selected = if self.devices.len() == 1 {
             self.devices.first()
         } else {
@@ -694,6 +763,7 @@ impl AppState {
             Command::Connect { .. } => self.print_active_device_summary(),
             Command::Disconnect => println!("Disconnected."),
             Command::QueryInfo | Command::QueryFirmware => self.print_active_device_summary(),
+            Command::Services => {}
             Command::SetAnc { .. }
             | Command::SetEq { .. }
             | Command::SetPromptLanguage { .. }
@@ -1016,94 +1086,102 @@ fn supported_devices() -> Vec<Device> {
     ]
 }
 
+/// Whether to fall back to the built-in demo catalog (which contains a
+/// hard-coded headset address) when no real device is detected. Linux keeps
+/// this historical behaviour; Windows only ever lists real paired devices.
+const USE_DEMO_CATALOG: bool = cfg!(not(target_os = "windows"));
+
+fn fallback_devices() -> Vec<Device> {
+    if USE_DEMO_CATALOG {
+        supported_devices()
+    } else {
+        Vec::new()
+    }
+}
+
 fn detect_devices() -> Result<Vec<Device>> {
-    let mut devices = connected_bluetooth_devices()?
-        .into_iter()
-        .filter_map(|(mac, name)| catalog_device_for_name(&name, &mac))
+    let found = discovery::list_devices()?;
+    let mut devices = found
+        .iter()
+        .filter_map(|device| catalog_device_for_name(&device.name, &device.mac))
         .collect::<Vec<_>>();
 
     if devices.is_empty() {
-        return Err(anyhow!("no supported connected devices found"));
+        if found.is_empty() {
+            return Err(anyhow!("no supported connected devices found"));
+        }
+        let names = found
+            .iter()
+            .map(|device| format!("`{}`", device.name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(anyhow!(
+            "no supported UGREEN headset among the {} Bluetooth device(s) the system reported: {names}",
+            found.len()
+        ));
     }
 
     devices.sort_by(|left, right| left.device_name.cmp(&right.device_name));
     Ok(devices)
 }
 
-/// `(mac, name)` of every Bluetooth device the OS reports as connected.
-#[cfg(target_os = "linux")]
-fn connected_bluetooth_devices() -> Result<Vec<(String, String)>> {
-    let output = std::process::Command::new("bluetoothctl")
-        .args(["devices", "Connected"])
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow!("bluetoothctl devices Connected failed"));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    Ok(stdout
-        .lines()
-        .filter_map(parse_bluetoothctl_device_line)
-        .collect())
-}
-
-/// Device discovery on Windows arrives with the Windows transport.
-#[cfg(not(target_os = "linux"))]
-fn connected_bluetooth_devices() -> Result<Vec<(String, String)>> {
-    Err(anyhow!(
-        "Bluetooth device discovery is not implemented on this platform yet"
-    ))
-}
-
-#[cfg(target_os = "linux")]
-fn parse_bluetoothctl_device_line(line: &str) -> Option<(String, String)> {
-    let trimmed = line.trim();
-    let remainder = trimmed.strip_prefix("Device ")?;
-    let mut parts = remainder.splitn(2, ' ');
-    let mac = parts.next()?.trim().to_string();
-    let name = parts.next()?.trim().to_string();
-    Some((mac, name))
+/// Lowercases and drops everything but letters and digits, so that
+/// `UGREEN HiTune Max 5c` and `HiTune-Max5c` compare equal on the model part.
+fn normalize_device_name(name: &str) -> String {
+    name.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_lowercase())
+        .collect()
 }
 
 fn catalog_device_for_name(name: &str, mac_address: &str) -> Option<Device> {
-    let normalized = name.trim();
+    let display_name = name.trim();
+    let key = normalize_device_name(display_name);
+    // Order matters: `max5c` must be tested before `max5`.
     let (protocol_type, product_serial_no, device_unique_code, is_over_ear, has_box) =
-        match normalized {
-            "UGREEN HiTune Max5c" => (
+        if key.contains("max5c") {
+            (
                 ProtocolType::Ug1,
                 "max5c_ota",
                 "UGREEN-MAX5C-LIVE",
                 true,
                 false,
-            ),
-            "UGREEN HiTune Max5" => (
+            )
+        } else if !key.contains("hitune") {
+            return None;
+        } else if key.contains("max5") {
+            (
                 ProtocolType::Ug1,
                 "max5_ota",
                 "UGREEN-MAX5-LIVE",
                 true,
                 false,
-            ),
-            "UGREEN HiTune H6 Pro" => (
+            )
+        } else if key.contains("h6pro") {
+            (
                 ProtocolType::Ug2,
                 "h6_pro_ota",
                 "UGREEN-H6PRO-LIVE",
                 false,
                 true,
-            ),
-            "UGREEN HiTune Max6" => (
+            )
+        } else if key.contains("max6") {
+            (
                 ProtocolType::Ug3,
                 "max6_ota",
                 "UGREEN-MAX6-LIVE",
                 true,
                 false,
-            ),
-            "UGREEN HiTune T6" => (ProtocolType::Ug1, "t6_ota", "UGREEN-T6-LIVE", false, true),
-            _ => return None,
+            )
+        } else if key.contains("hitunet6") {
+            (ProtocolType::Ug1, "t6_ota", "UGREEN-T6-LIVE", false, true)
+        } else {
+            return None;
         };
 
     Some(Device::from_runtime(
         mac_address.to_string(),
-        normalized.to_string(),
+        display_name.to_string(),
         protocol_type,
         mac_address.to_string(),
         product_serial_no,
@@ -1148,6 +1226,17 @@ fn resolve_device_id_alias(device_id: &str) -> &str {
     }
 }
 
+/// The model a `connect` alias refers to, as it appears in a normalized name.
+fn alias_model_key(device_id: &str) -> Option<&'static str> {
+    match device_id.to_ascii_lowercase().as_str() {
+        "max5c" | "max-5c" | "hitune-max5c" => Some("max5c"),
+        "max6" | "max-6" | "hitune-max6" => Some("max6"),
+        "h6pro" | "h6-pro" => Some("h6pro"),
+        "t6" => Some("hitunet6"),
+        _ => None,
+    }
+}
+
 fn parse_cli_anc_depth(depth: &str) -> Option<u8> {
     match depth.to_ascii_lowercase().as_str() {
         "off" => Some(0),
@@ -1156,5 +1245,61 @@ fn parse_cli_anc_depth(depth: &str) -> Option<u8> {
         "medium" => Some(2),
         "deep" => Some(3),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn catalog_matches_name_variants() {
+        for name in [
+            "UGREEN HiTune Max5c",
+            "UGREEN HiTune Max 5c",
+            "HiTune Max5c",
+            "ugreen hitune max5c ",
+            "Max5c",
+        ] {
+            let device = catalog_device_for_name(name, "AA:BB:CC:DD:EE:FF")
+                .unwrap_or_else(|| panic!("{name:?} should match"));
+            assert_eq!(device.product_serial_no, "max5c_ota");
+            assert_eq!(device.protocol_type, ProtocolType::Ug1);
+            assert_eq!(device.id, "AA:BB:CC:DD:EE:FF");
+            assert_eq!(device.device_name, name.trim());
+        }
+    }
+
+    #[test]
+    fn catalog_keeps_models_apart() {
+        let serial = |name: &str| {
+            catalog_device_for_name(name, "AA:BB:CC:DD:EE:FF").map(|d| d.product_serial_no)
+        };
+        assert_eq!(serial("UGREEN HiTune Max5").as_deref(), Some("max5_ota"));
+        assert_eq!(
+            serial("UGREEN HiTune H6 Pro").as_deref(),
+            Some("h6_pro_ota")
+        );
+        assert_eq!(serial("UGREEN HiTune Max6").as_deref(), Some("max6_ota"));
+        assert_eq!(serial("UGREEN HiTune T6").as_deref(), Some("t6_ota"));
+        for other in [
+            "WH-1000XM5",
+            "Galaxy Buds Max 5",
+            "Logitech T650",
+            "UGREEN HiTune",
+        ] {
+            assert_eq!(serial(other), None, "{other:?} should not match");
+        }
+    }
+
+    #[test]
+    fn factory_reset_requires_the_explicit_flag() {
+        let parsed = AppArgs::try_parse_from(["ugreen", "factory-reset"]).unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Command::FactoryReset {
+                yes_really_reset_device: false
+            })
+        ));
     }
 }
