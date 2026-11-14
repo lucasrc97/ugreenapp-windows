@@ -98,3 +98,27 @@ fn response_checksum_is_crc16_ccitt_false_little_endian() {
         );
     }
 }
+
+#[test]
+fn incomplete_responses_are_never_returned_as_frames() {
+    // While a response is still arriving, no prefix of it may be mistaken for
+    // a complete frame (the reassembler falls back to a checksum scan when
+    // the declared length is not buffered yet).
+    for frame in [&FIRMWARE_RESPONSE[..], &INFO_RESPONSE[..]] {
+        for len in 0..frame.len() {
+            assert_eq!(find_complete_ug1_frame(&frame[..len]), None, "prefix {len}");
+        }
+    }
+}
+
+#[test]
+fn checksum_scan_recovers_a_frame_whose_length_byte_overstates() {
+    // SYNTHETIC: the real firmware response with its length byte changed from
+    // 6 to 9 and the checksum recomputed. The declared size never arrives, so
+    // the frame can only be delimited by its CRC-16/CCITT-FALSE checksum.
+    let mut frame = FIRMWARE_RESPONSE;
+    frame[5] = 9;
+    let checksum = crc16_ccitt_false(&frame[3..12]).to_le_bytes();
+    frame[12..].copy_from_slice(&checksum);
+    assert_eq!(find_complete_ug1_frame(&frame).as_deref(), Some(&frame[..]));
+}

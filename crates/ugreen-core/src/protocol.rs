@@ -400,7 +400,7 @@ pub fn find_complete_ug1_frame(buffer: &[u8]) -> Option<Vec<u8>> {
             let frame = &buffer[index..index + total_len];
             let expected_crc =
                 u16::from(frame[frame.len() - 1]) << 8 | u16::from(frame[frame.len() - 2]);
-            let actual_crc = crc16(&frame[3..frame.len() - 2]);
+            let actual_crc = crc16_ccitt_false(&frame[3..frame.len() - 2]);
             if expected_crc == actual_crc {
                 return Some(frame.to_vec());
             }
