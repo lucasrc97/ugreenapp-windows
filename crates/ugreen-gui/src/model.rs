@@ -102,6 +102,26 @@ impl AncChoice {
         }
     }
 
+    /// The noise-cancelling strengths, weakest first, then automatic.
+    pub const INTENSITIES: [Self; 4] = [Self::Light, Self::Medium, Self::Deep, Self::Adaptive];
+
+    /// Whether this choice is "noise cancelling on" at some strength.
+    pub fn is_noise_cancelling(self) -> bool {
+        Self::INTENSITIES.contains(&self)
+    }
+
+    /// The strength the headset still remembers while noise cancelling is
+    /// off or in transparency, when the report says (`ancDepth` of `light`,
+    /// `medium` or `deep`).
+    pub fn remembered_intensity(depth: &str) -> Option<Self> {
+        match depth {
+            "light" => Some(Self::Light),
+            "medium" => Some(Self::Medium),
+            "deep" => Some(Self::Deep),
+            _ => None,
+        }
+    }
+
     /// Inverse of [`Self::from_report`], used by the demo headset.
     pub fn to_report(self) -> (&'static str, &'static str) {
         match self {
@@ -158,6 +178,8 @@ pub struct HeadsetState {
     /// Single level: the Max5c is over-ear and reports one battery.
     pub battery: Option<u8>,
     pub anc: Option<AncChoice>,
+    /// Noise-cancelling strength to go back to when it is switched on again.
+    pub anc_intensity: Option<AncChoice>,
     pub eq: Option<String>,
     pub prompt_language: Option<String>,
     pub prompt_volume: Option<u8>,
@@ -180,6 +202,10 @@ impl HeadsetState {
         if let Some(mode) = data.get("ancMode").and_then(Value::as_str) {
             let depth = data.get("ancDepth").and_then(Value::as_str).unwrap_or("");
             self.anc = AncChoice::from_report(mode, depth);
+            self.anc_intensity = match self.anc {
+                Some(choice) if choice.is_noise_cancelling() => Some(choice),
+                _ => AncChoice::remembered_intensity(depth),
+            };
         }
         if let Some(eq) = data.get("eqMode").and_then(Value::as_str) {
             self.eq = Some(eq.to_string());
@@ -223,6 +249,8 @@ mod tests {
                 firmware: Some("0.5.7".into()),
                 battery: Some(90),
                 anc: Some(AncChoice::Off),
+                // Raw byte 0xA0: off, with "deep" remembered.
+                anc_intensity: Some(AncChoice::Deep),
                 eq: Some("treble".into()),
                 prompt_language: Some("English".into()),
                 prompt_volume: Some(9),
@@ -263,6 +291,26 @@ mod tests {
             // AA BB CC cmd len data crc crc
             assert_eq!(frame[5], byte, "{choice:?}");
         }
+    }
+
+    #[test]
+    fn intensity_follows_the_report() {
+        let mut state = HeadsetState::default();
+        state.apply(&json!({ "ancMode": "adaptive", "ancDepth": "light" }));
+        assert_eq!(state.anc_intensity, Some(AncChoice::Light));
+        state.apply(&json!({ "ancMode": "transparent", "ancDepth": "medium" }));
+        assert_eq!(state.anc, Some(AncChoice::Transparency));
+        assert_eq!(state.anc_intensity, Some(AncChoice::Medium));
+        // Plain "off" (0xD0) decodes with depth "adaptive": nothing remembered.
+        state.apply(&json!({ "ancMode": "off", "ancDepth": "adaptive" }));
+        assert_eq!(state.anc_intensity, None);
+        assert!(
+            AncChoice::INTENSITIES
+                .iter()
+                .all(|c| c.is_noise_cancelling())
+        );
+        assert!(!AncChoice::Off.is_noise_cancelling());
+        assert!(!AncChoice::Transparency.is_noise_cancelling());
     }
 
     #[test]

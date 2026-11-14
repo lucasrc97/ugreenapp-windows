@@ -28,12 +28,15 @@ struct Connection {
     state: HeadsetState,
     /// Slider position while the user drags it; sent on release.
     volume_draft: u8,
+    /// Strength used when "Noise cancelling" is switched on.
+    last_intensity: AncChoice,
 }
 
 impl Connection {
     fn new(device: DeviceEntry, state: HeadsetState) -> Self {
         let volume_draft = state.prompt_volume.unwrap_or(*PROMPT_VOLUME_RANGE.start());
         Self {
+            last_intensity: state.anc_intensity.unwrap_or(AncChoice::Adaptive),
             device,
             state,
             volume_draft,
@@ -47,6 +50,9 @@ impl Connection {
         }
         if let Some(volume) = state.prompt_volume {
             self.volume_draft = volume;
+        }
+        if let Some(intensity) = state.anc_intensity {
+            self.last_intensity = intensity;
         }
         self.state = state;
     }
@@ -252,13 +258,46 @@ impl App {
 
         ui.add_enabled_ui(idle, |ui| {
             section(ui, "Noise control", |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    for choice in AncChoice::ALL {
-                        let selected = state.anc == Some(choice);
-                        if ui.selectable_label(selected, choice.label()).clicked() && !selected {
-                            pending = Some(set(Setting::Anc(choice)));
+                let noise_cancelling = state.anc.is_some_and(AncChoice::is_noise_cancelling);
+                egui::Grid::new("noise").num_columns(2).show(ui, |ui| {
+                    ui.label("Mode");
+                    ui.horizontal(|ui| {
+                        let modes = [
+                            ("Off", state.anc == Some(AncChoice::Off), AncChoice::Off),
+                            (
+                                "Transparency",
+                                state.anc == Some(AncChoice::Transparency),
+                                AncChoice::Transparency,
+                            ),
+                            // Switching it on goes back to the last strength.
+                            (
+                                "Noise cancelling",
+                                noise_cancelling,
+                                connection.last_intensity,
+                            ),
+                        ];
+                        for (label, selected, choice) in modes {
+                            if ui.selectable_label(selected, label).clicked() && !selected {
+                                pending = Some(set(Setting::Anc(choice)));
+                            }
                         }
-                    }
+                    });
+                    ui.end_row();
+                    ui.label("Intensity");
+                    ui.add_enabled_ui(noise_cancelling, |ui| {
+                        ui.horizontal(|ui| {
+                            for choice in AncChoice::INTENSITIES {
+                                let selected = state.anc == Some(choice);
+                                let button = ui
+                                    .selectable_label(selected, choice.label())
+                                    .on_disabled_hover_text("Only with noise cancelling on.");
+                                if button.clicked() && !selected {
+                                    pending = Some(set(Setting::Anc(choice)));
+                                }
+                            }
+                        });
+                    });
+                    ui.end_row();
                 });
                 if state.anc.is_none() {
                     ui.label(RichText::new("The headset reported an unknown mode.").weak());
