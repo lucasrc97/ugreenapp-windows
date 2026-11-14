@@ -523,7 +523,7 @@ fn decode_ug1(bytes: &[u8]) -> Result<DecodedFrame> {
     }
 
     let crc_expected = u16::from(bytes[expected_len - 1]) << 8 | u16::from(bytes[expected_len - 2]);
-    let crc_actual = crc16(&bytes[3..expected_len - 2]);
+    let crc_actual = crc16_ccitt_false(&bytes[3..expected_len - 2]);
     let payload = &bytes[6..expected_len - 2];
     let command = ug1_command_name(command_id).to_string();
     let mut data = parse_ug1_data(command_id, payload);
@@ -1219,6 +1219,26 @@ fn crc16(bytes: &[u8]) -> u16 {
     crc
 }
 
+/// CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF, no reflection).
+///
+/// This is what the headset puts at the end of its UG1 *responses* (verified
+/// on captures from a HiTune Max5c, see `real_captures.rs`). Requests keep
+/// using [`crc16`] (CRC-16/MODBUS), which is what the headset accepts.
+fn crc16_ccitt_false(bytes: &[u8]) -> u16 {
+    let mut crc = 0xFFFFu16;
+    for byte in bytes {
+        crc ^= u16::from(*byte) << 8;
+        for _ in 0..8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ 0x1021
+            } else {
+                crc << 1
+            };
+        }
+    }
+    crc
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1368,5 +1388,12 @@ mod tests {
 
         let dual_link_data = parse_ug1_hardware_data(12, &[1]);
         assert_eq!(dual_link_data["dualLink"], true);
+    }
+
+    #[test]
+    fn test_crc_check_values() {
+        // Standard check values for the ASCII string "123456789".
+        assert_eq!(crc16(b"123456789"), 0x4B37);
+        assert_eq!(crc16_ccitt_false(b"123456789"), 0x29B1);
     }
 }

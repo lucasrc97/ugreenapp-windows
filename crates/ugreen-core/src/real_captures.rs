@@ -7,12 +7,10 @@
 //! What the *fields mean* is still the decoder's interpretation; these tests
 //! only pin how the decoder reads bytes the headset really sent.
 //!
-//! FINDING: the trailing checksum of these responses is not the CRC-16/MODBUS
-//! that `protocol.rs` uses for requests and expects on responses. It matches
+//! These captures showed that the trailing checksum of a response is
 //! CRC-16/CCITT-FALSE (poly 0x1021, init 0xFFFF) over `[cmd, status, len,
-//! payload]`, stored low byte first. So the decoder reports `crcValid: false`
-//! for genuine frames. The decoder never rejects on CRC, so nothing breaks;
-//! the tests below pin today's behaviour and document the real algorithm.
+//! payload]`, stored low byte first, not the CRC-16/MODBUS used on requests.
+//! The decoder's `crcValid` was corrected accordingly.
 
 use crate::protocol::{ProtocolFacade, ProtocolType, UgProtocolFacade, find_complete_ug1_frame};
 
@@ -39,7 +37,7 @@ fn firmware_response() {
         .unwrap();
     assert!(frame.success);
     assert_eq!(frame.command, "GET_VERSION");
-    assert_eq!(frame.data["crcValid"], false, "see FINDING in module docs");
+    assert_eq!(frame.data["crcValid"], true);
     assert_eq!(frame.data["firmwareVersion"], "0.5.7");
 }
 
@@ -55,7 +53,7 @@ fn info_response() {
     assert!(frame.success);
     assert_eq!(frame.command, "GET_INFO");
     let data = &frame.data;
-    assert_eq!(data["crcValid"], false, "see FINDING in module docs");
+    assert_eq!(data["crcValid"], true);
     // Over-ear headset: a single battery value, reported in the `left` slot.
     assert_eq!(data["battery"], serde_json::json!({ "left": 90 }));
     assert_eq!(data["ancMode"], "off");

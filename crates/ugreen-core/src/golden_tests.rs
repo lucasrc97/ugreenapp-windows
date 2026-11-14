@@ -8,7 +8,10 @@
 //! `SetPromptLanguage` and `SetPromptVolume` are the ones reported as working
 //! on a real HiTune Max5c over Linux RFCOMM. Every *response* frame in this
 //! file is SYNTHETIC (built from the decoder's own layout, with a valid CRC),
-//! not a capture from real hardware.
+//! not a capture from real hardware. Their trailing checksums were updated
+//! from CRC-16/MODBUS to CRC-16/CCITT-FALSE when the decoder was corrected to
+//! check what the headset really sends (see `real_captures.rs`); request
+//! bytes were not touched.
 //!
 //! Only the public API is used so this file stays byte-identical across moves.
 
@@ -421,7 +424,7 @@ const UG1_INFO_RESPONSE: [u8; 34] = [
     0x01, 0x00, // [20] spatial on, [21] wear off
     0x00, 0x00, // [22..24] unused by decoder
     0x00, 0x00, // [24] audio share off, [25] wind noise off
-    0x9D, 0xD8, // crc
+    0xC1, 0x1B, // crc
 ];
 
 fn decode_ug1(bytes: &[u8]) -> (bool, String, serde_json::Value, Vec<u8>) {
@@ -465,13 +468,13 @@ fn ug1_decode_simple_responses() {
     let cases: [(&[u8], &str, serde_json::Value); 5] = [
         (
             &[
-                0xDD, 0xEE, 0xFF, 0x01, 0x01, 0x06, 0x01, 0x00, 0x07, 0x00, 0x00, 0x00, 0xA0, 0x09,
+                0xDD, 0xEE, 0xFF, 0x01, 0x01, 0x06, 0x01, 0x00, 0x07, 0x00, 0x00, 0x00, 0x2A, 0x01,
             ],
             "GET_VERSION",
             json!({ "crcValid": true, "firmwareVersion": "1.0.7", "success": true }),
         ),
         (
-            &[0xDD, 0xEE, 0xFF, 0x09, 0x01, 0x01, 0xD2, 0xD3, 0xB5],
+            &[0xDD, 0xEE, 0xFF, 0x09, 0x01, 0x01, 0xD2, 0x89, 0x98],
             "ANC_MODE",
             json!({
                 "ancDepth": "adaptive", "ancMode": "transparent",
@@ -479,17 +482,17 @@ fn ug1_decode_simple_responses() {
             }),
         ),
         (
-            &[0xDD, 0xEE, 0xFF, 0x05, 0x01, 0x01, 0x06, 0xD0, 0xBA],
+            &[0xDD, 0xEE, 0xFF, 0x05, 0x01, 0x01, 0x06, 0x42, 0x5C],
             "EQ_SET",
             json!({ "crcValid": true, "eqMode": "bass", "success": true }),
         ),
         (
-            &[0xDD, 0xEE, 0xFF, 0x0C, 0x01, 0x01, 0x00, 0x53, 0x24],
+            &[0xDD, 0xEE, 0xFF, 0x0C, 0x01, 0x01, 0x00, 0xF3, 0xCF],
             "PROMPT_LANG",
             json!({ "crcValid": true, "promptLanguage": "English", "success": true }),
         ),
         (
-            &[0xDD, 0xEE, 0xFF, 0x11, 0x01, 0x01, 0x09, 0x95, 0x4E],
+            &[0xDD, 0xEE, 0xFF, 0x11, 0x01, 0x01, 0x09, 0xFB, 0x7C],
             "PROMPT_VOL",
             json!({ "crcValid": true, "promptVolume": 9, "success": true }),
         ),
@@ -505,7 +508,7 @@ fn ug1_decode_simple_responses() {
 #[test]
 fn ug1_decode_status_zero_is_failure() {
     let (success, command, data, _) =
-        decode_ug1(&[0xDD, 0xEE, 0xFF, 0x05, 0x00, 0x01, 0x06, 0x81, 0x7A]);
+        decode_ug1(&[0xDD, 0xEE, 0xFF, 0x05, 0x00, 0x01, 0x06, 0x72, 0x6B]);
     assert!(!success);
     assert_eq!(command, "EQ_SET");
     assert_eq!(
@@ -519,6 +522,10 @@ fn ug1_decode_bad_crc_is_reported_not_rejected() {
     // Quirk: a CRC mismatch only flips `crcValid`; the frame is still decoded.
     let (success, _, data, _) = decode_ug1(&[0xDD, 0xEE, 0xFF, 0x05, 0x01, 0x01, 0x06, 0x00, 0x00]);
     assert!(success);
+    assert_eq!(data["crcValid"], false);
+
+    // The MODBUS checksum used for requests is not valid on a response.
+    let (_, _, data, _) = decode_ug1(&[0xDD, 0xEE, 0xFF, 0x05, 0x01, 0x01, 0x06, 0xD0, 0xBA]);
     assert_eq!(data["crcValid"], false);
 }
 
