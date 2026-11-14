@@ -2,6 +2,7 @@
 //! the worker thread and draws whatever [`Event`]s came back.
 
 use std::sync::mpsc::{Receiver, Sender};
+use std::time::{Duration, Instant};
 
 use eframe::egui::{self, Color32, RichText};
 
@@ -10,12 +11,19 @@ use crate::model::{
 };
 use crate::worker::{DeviceEntry, Event, Request};
 
+/// Pause after each headset command before the next one may be sent.
+/// Changing settings in quick succession has frozen a HiTune Max5c (it
+/// would not even power off), so the controls stay disabled for a moment.
+const COMMAND_COOLDOWN: Duration = Duration::from_secs(1);
+
 pub struct App {
     requests: Sender<Request>,
     events: Receiver<Event>,
     demo: bool,
     /// What the worker is doing right now; controls are disabled meanwhile.
     busy: Option<String>,
+    /// When the last headset command finished.
+    last_command_done: Option<Instant>,
     devices: Vec<DeviceEntry>,
     scanned_once: bool,
     selected_mac: Option<String>,
@@ -65,6 +73,7 @@ impl App {
             events,
             demo,
             busy: None,
+            last_command_done: None,
             devices: Vec::new(),
             scanned_once: false,
             selected_mac: None,
@@ -84,9 +93,23 @@ impl App {
         }
     }
 
+    /// Time left before the headset may be sent another command.
+    fn cooldown_left(&self) -> Option<Duration> {
+        cooldown_remaining(self.last_command_done?.elapsed())
+    }
+
+    /// Whether a new command may be sent right now.
+    fn idle(&self) -> bool {
+        self.busy.is_none() && self.cooldown_left().is_none()
+    }
+
     fn drain_events(&mut self) {
         while let Ok(event) = self.events.try_recv() {
             self.busy = None;
+            // Listing paired devices does not talk to the headset.
+            if !matches!(event, Event::Devices(_)) {
+                self.last_command_done = Some(Instant::now());
+            }
             match event {
                 Event::Devices(Ok(devices)) => {
                     self.scanned_once = true;
@@ -138,6 +161,9 @@ impl App {
                 ui.label(activity);
             } else if let Some(error) = &self.error {
                 ui.label(RichText::new(error).color(Color32::from_rgb(220, 80, 80)));
+            } else if self.cooldown_left().is_some() {
+                ui.spinner();
+                ui.label("Giving the headset a moment…");
             } else if self.connection.is_some() {
                 ui.label("Showing the values last read from the headset.");
             } else {
@@ -147,7 +173,7 @@ impl App {
     }
 
     fn connection_screen(&mut self, ui: &mut egui::Ui) {
-        let idle = self.busy.is_none();
+        let idle = self.idle();
         ui.heading("Paired devices");
         ui.label("Devices already paired in the system Bluetooth settings.");
         ui.add_space(8.0);
@@ -210,7 +236,7 @@ impl App {
     }
 
     fn headset_screen(&mut self, ui: &mut egui::Ui) {
-        let idle = self.busy.is_none();
+        let idle = self.idle();
         let mut pending: Option<(Request, String)> = None;
         let mut leave = false;
         let Some(connection) = &mut self.connection else {
@@ -359,6 +385,13 @@ impl App {
     }
 }
 
+/// Cooldown still to wait, given the time since the last command finished.
+fn cooldown_remaining(elapsed: Duration) -> Option<Duration> {
+    COMMAND_COOLDOWN
+        .checked_sub(elapsed)
+        .filter(|left| !left.is_zero())
+}
+
 fn set(setting: Setting) -> (Request, String) {
     let activity = format!("Setting {}…", setting.describe());
     (Request::Set(setting), activity)
@@ -382,6 +415,10 @@ fn capitalize(word: &str) -> String {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
+        // Nothing else wakes the UI when the cooldown ends.
+        if let Some(left) = self.cooldown_left() {
+            ctx.request_repaint_after(left);
+        }
 
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.add_space(4.0);
@@ -404,5 +441,49 @@ impl eframe::App for App {
                 }
             });
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::AncChoice;
+    use std::sync::mpsc::channel;
+
+    #[test]
+    fn cooldown_lasts_one_second() {
+        assert_eq!(COMMAND_COOLDOWN, Duration::from_secs(1));
+        assert_eq!(
+            cooldown_remaining(Duration::from_millis(300)),
+            Some(Duration::from_millis(700))
+        );
+        assert_eq!(cooldown_remaining(Duration::from_secs(1)), None);
+        assert_eq!(cooldown_remaining(Duration::from_secs(5)), None);
+    }
+
+    #[test]
+    fn controls_stay_locked_right_after_a_headset_command() {
+        let (requests, _request_rx) = channel();
+        let (event_tx, events) = channel();
+        let mut app = App::new(requests, events, true);
+        assert!(!app.idle(), "the initial scan is in flight");
+
+        // Listing devices does not touch the headset: no cooldown.
+        event_tx.send(Event::Devices(Ok(Vec::new()))).unwrap();
+        app.drain_events();
+        assert!(app.idle());
+
+        // A finished headset command starts the cooldown.
+        app.request(Request::Set(Setting::Anc(AncChoice::Off)), "test");
+        event_tx
+            .send(Event::State(HeadsetState::default()))
+            .unwrap();
+        app.drain_events();
+        assert!(app.busy.is_none());
+        assert!(!app.idle());
+
+        // ...which ends once the cooldown time has passed.
+        app.last_command_done = Instant::now().checked_sub(COMMAND_COOLDOWN);
+        assert!(app.idle());
     }
 }
