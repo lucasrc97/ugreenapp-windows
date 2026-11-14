@@ -7,17 +7,33 @@ Current status:
 - verified commands: `query-info`, `query-firmware`, `set-anc`, `set-eq`, `set-prompt-language`, `set-prompt-volume`
 - the main code in this repository was created with AI assistance and then tested/refined manually
 
+## Layout
+
+Cargo workspace under `crates/`:
+
+- `ugreen-core` (lib): protocol frames and the `Transport` trait, with one
+  transport per OS (`transport/linux.rs`, `transport/windows.rs`)
+- `ugreen-cli` (bin): command line and REPL
+- `ugreen-gui` (bin): placeholder, not implemented yet
+
 ## Build
+
+Linux:
 
 ```bash
 cargo build --release
+./target/release/ugreen-cli
 ```
 
-Binary:
+Windows, cross-compiled from Linux with [cargo-xwin](https://github.com/rust-cross/cargo-xwin):
 
 ```bash
-./target/release/ugreen_core
+cargo xwin build --release --target x86_64-pc-windows-msvc
+./target/x86_64-pc-windows-msvc/release/ugreen-cli.exe
 ```
+
+The Windows build compiles, but its Bluetooth transport is still a stub: every
+device command returns an error.
 
 ## CLI
 
@@ -34,7 +50,7 @@ Useful commands:
 Use `--json` with any command for full state output, for example:
 
 ```bash
-./target/release/ugreen_core --json query-info
+./target/release/ugreen-cli --json query-info
 ```
 
 Inside the REPL:

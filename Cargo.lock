@@ -349,16 +349,30 @@ dependencies = [
 ]
 
 [[package]]
-name = "ugreen_core"
+name = "ugreen-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "serde",
+ "serde_json",
+ "ugreen-core",
+]
+
+[[package]]
+name = "ugreen-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "libc",
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "ugreen-gui"
+version = "0.1.0"
 
 [[package]]
 name = "unicode-ident"

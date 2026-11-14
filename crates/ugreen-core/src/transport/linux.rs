@@ -1,3 +1,5 @@
+//! Linux transport: BlueZ RFCOMM sockets through `libc`.
+
 use anyhow::{Context, Result, anyhow};
 use libc::{
     POLLIN, SO_RCVTIMEO, SO_SNDTIMEO, SOCK_STREAM, SOL_SOCKET, c_void, pollfd, suseconds_t, time_t,
@@ -11,29 +13,21 @@ use std::os::fd::{AsRawFd, FromRawFd};
 use std::thread;
 use std::time::Duration;
 
+use super::{Transport, TransportTarget};
 use crate::protocol::{
     DecodedFrame, ProtocolCommand, ProtocolFacade, ProtocolType, UgProtocolFacade,
     find_complete_rcsp_frame, find_complete_ug1_frame, unwrap_rcsp_custom, wrap_rcsp_custom,
 };
 
-pub struct TransportTarget {
-    pub mac_address: String,
-    pub protocol: ProtocolType,
-    pub rfcomm_channel: u8,
-}
-
-pub trait Transport {
-    fn send(
-        &mut self,
-        target: &TransportTarget,
-        command: &ProtocolCommand,
-        payload: &Value,
-    ) -> Result<DecodedFrame>;
-}
-
 pub struct LinuxTransport {
     facade: Box<dyn ProtocolFacade>,
     sequence: u8,
+}
+
+impl Default for LinuxTransport {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl LinuxTransport {
@@ -226,13 +220,13 @@ impl LinuxTransport {
 
         if target.protocol != ProtocolType::Ug1
             && matches!(
-            command,
-            ProtocolCommand::SetAnc { .. }
-                | ProtocolCommand::SetEq { .. }
-                | ProtocolCommand::SetPromptLanguage { .. }
-                | ProtocolCommand::SetPromptVolume { .. }
-                | ProtocolCommand::FactoryReset
-        )
+                command,
+                ProtocolCommand::SetAnc { .. }
+                    | ProtocolCommand::SetEq { .. }
+                    | ProtocolCommand::SetPromptLanguage { .. }
+                    | ProtocolCommand::SetPromptVolume { .. }
+                    | ProtocolCommand::FactoryReset
+            )
         {
             return Ok(DecodedFrame {
                 success: true,

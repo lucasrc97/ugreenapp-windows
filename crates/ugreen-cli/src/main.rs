@@ -1,16 +1,12 @@
-mod protocol;
-mod transport;
-
 use anyhow::{Result, anyhow};
 use chrono::Utc;
 use clap::{Parser, Subcommand};
-use protocol::{FeatureSupport, ProtocolCommand, ProtocolType};
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::collections::VecDeque;
 use std::io::{self, Write};
-use std::process::Command as ProcessCommand;
-use transport::{LinuxTransport, Transport, TransportTarget};
+use ugreen_core::protocol::{DecodedFrame, FeatureSupport, ProtocolCommand, ProtocolType};
+use ugreen_core::transport::{PlatformTransport, Transport, TransportTarget};
 
 const MAX_LOGS: usize = 200;
 
@@ -53,10 +49,10 @@ fn repl(state: &mut AppState) -> Result<()> {
             continue;
         }
 
-        if let Some(parsed) = parse_inline_command(trimmed) {
-            if let Err(error) = run_command(parsed.command, state, parsed.json) {
-                eprintln!("Error: {error}");
-            }
+        if let Some(parsed) = parse_inline_command(trimmed)
+            && let Err(error) = run_command(parsed.command, state, parsed.json)
+        {
+            eprintln!("Error: {error}");
         }
     }
 
@@ -327,15 +323,12 @@ impl Command {
             Command::SetGameMode { enabled } => {
                 state.apply_protocol_command(ProtocolCommand::SetGameMode { enabled: *enabled })?
             }
-            Command::SetDualConnect { enabled } => {
-                state.apply_protocol_command(ProtocolCommand::SetDualConnect { enabled: *enabled })?
-            }
-            Command::SetSpatialAudio { enabled } => {
-                state.apply_protocol_command(ProtocolCommand::SetSpatialAudio { enabled: *enabled })?
-            }
-            Command::SetHighQuality { enabled } => {
-                state.apply_protocol_command(ProtocolCommand::SetHighQuality { enabled: *enabled })?
-            }
+            Command::SetDualConnect { enabled } => state
+                .apply_protocol_command(ProtocolCommand::SetDualConnect { enabled: *enabled })?,
+            Command::SetSpatialAudio { enabled } => state
+                .apply_protocol_command(ProtocolCommand::SetSpatialAudio { enabled: *enabled })?,
+            Command::SetHighQuality { enabled } => state
+                .apply_protocol_command(ProtocolCommand::SetHighQuality { enabled: *enabled })?,
             Command::FactoryReset {
                 yes_really_reset_device,
             } => {
@@ -363,17 +356,17 @@ struct AppState {
 impl AppState {
     fn new() -> Self {
         Self {
-            devices: detect_linux_devices().unwrap_or_else(|_| supported_devices()),
+            devices: detect_devices().unwrap_or_else(|_| supported_devices()),
             scanning: false,
             connected: false,
             active_device_id: None,
             logs: VecDeque::with_capacity(MAX_LOGS),
-            transport: Box::new(LinuxTransport::new()),
+            transport: Box::new(PlatformTransport::new()),
         }
     }
 
     fn refresh_devices(&mut self) {
-        if let Ok(devices) = detect_linux_devices() {
+        if let Ok(devices) = detect_devices() {
             self.devices = devices;
         }
     }
@@ -478,7 +471,7 @@ impl AppState {
     fn apply_response_to_device(
         device: &mut Device,
         command: &ProtocolCommand,
-        response: &protocol::DecodedFrame,
+        response: &DecodedFrame,
     ) -> Value {
         if let Some(name) = response.data.get("deviceName").and_then(Value::as_str) {
             device.device_name = name.to_string();
@@ -490,10 +483,10 @@ impl AppState {
             device.anc_mode = anc_mode.to_string();
             device.features.anc = anc_mode != "unknown";
         }
-        if let Some(anc_depth) = response.data.get("ancDepth").and_then(Value::as_str) {
-            if let Some(depth) = parse_cli_anc_depth(anc_depth) {
-                device.anc_depth = depth;
-            }
+        if let Some(anc_depth) = response.data.get("ancDepth").and_then(Value::as_str)
+            && let Some(depth) = parse_cli_anc_depth(anc_depth)
+        {
+            device.anc_depth = depth;
         }
         if let Some(eq_mode) = response.data.get("eqMode").and_then(Value::as_str) {
             device.eq_mode = eq_mode.to_string();
@@ -570,7 +563,8 @@ impl AppState {
                 json!({ "eqMode": device.eq_mode, "success": response.success })
             }
             ProtocolCommand::SetPromptLanguage { value } => {
-                if let Some(language) = response.data.get("promptLanguage").and_then(Value::as_str) {
+                if let Some(language) = response.data.get("promptLanguage").and_then(Value::as_str)
+                {
                     device.prompt_language = language.to_string();
                 } else {
                     device.prompt_language = value.clone();
@@ -686,7 +680,13 @@ impl AppState {
                     } else {
                         ""
                     };
-                    println!("  {} ({}, {}){}", device.device_name, device.id, device.protocol_type.definition().name, active);
+                    println!(
+                        "  {} ({}, {}){}",
+                        device.device_name,
+                        device.id,
+                        device.protocol_type.definition().name,
+                        active
+                    );
                 }
             }
             Command::StopScan => println!("Scan stopped."),
@@ -712,7 +712,11 @@ impl AppState {
             println!("Active device: {} ({})", device.device_name, device.id);
             println!(
                 "  ANC: {} (depth {}) | EQ: {} | Prompt: {} @ {}",
-                device.anc_mode, device.anc_depth, device.eq_mode, device.prompt_language, device.prompt_volume
+                device.anc_mode,
+                device.anc_depth,
+                device.eq_mode,
+                device.prompt_language,
+                device.prompt_volume
             );
             println!(
                 "  Battery L/R/Box: {}/{}/{} | FW: {}",
@@ -786,6 +790,7 @@ struct Device {
 }
 
 impl Device {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         id: &'static str,
         device_name: &'static str,
@@ -879,6 +884,7 @@ impl Device {
         self.ai_enabled = definition.supports.ai;
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn from_runtime(
         id: String,
         device_name: String,
@@ -1010,18 +1016,9 @@ fn supported_devices() -> Vec<Device> {
     ]
 }
 
-fn detect_linux_devices() -> Result<Vec<Device>> {
-    let output = ProcessCommand::new("bluetoothctl")
-        .args(["devices", "Connected"])
-        .output()?;
-    if !output.status.success() {
-        return Err(anyhow!("bluetoothctl devices Connected failed"));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let mut devices = stdout
-        .lines()
-        .filter_map(parse_bluetoothctl_device_line)
+fn detect_devices() -> Result<Vec<Device>> {
+    let mut devices = connected_bluetooth_devices()?
+        .into_iter()
         .filter_map(|(mac, name)| catalog_device_for_name(&name, &mac))
         .collect::<Vec<_>>();
 
@@ -1033,6 +1030,32 @@ fn detect_linux_devices() -> Result<Vec<Device>> {
     Ok(devices)
 }
 
+/// `(mac, name)` of every Bluetooth device the OS reports as connected.
+#[cfg(target_os = "linux")]
+fn connected_bluetooth_devices() -> Result<Vec<(String, String)>> {
+    let output = std::process::Command::new("bluetoothctl")
+        .args(["devices", "Connected"])
+        .output()?;
+    if !output.status.success() {
+        return Err(anyhow!("bluetoothctl devices Connected failed"));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .lines()
+        .filter_map(parse_bluetoothctl_device_line)
+        .collect())
+}
+
+/// Device discovery on Windows arrives with the Windows transport.
+#[cfg(not(target_os = "linux"))]
+fn connected_bluetooth_devices() -> Result<Vec<(String, String)>> {
+    Err(anyhow!(
+        "Bluetooth device discovery is not implemented on this platform yet"
+    ))
+}
+
+#[cfg(target_os = "linux")]
 fn parse_bluetoothctl_device_line(line: &str) -> Option<(String, String)> {
     let trimmed = line.trim();
     let remainder = trimmed.strip_prefix("Device ")?;

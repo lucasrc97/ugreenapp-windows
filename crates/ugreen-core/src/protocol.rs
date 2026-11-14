@@ -224,6 +224,7 @@ pub trait ProtocolFacade {
     fn decode_inner(&self, protocol: ProtocolType, bytes: &[u8]) -> Result<DecodedFrame>;
 }
 
+#[derive(Default)]
 pub struct UgProtocolFacade;
 
 impl UgProtocolFacade {
@@ -579,8 +580,8 @@ fn parse_ug1_data(command_id: u8, payload: &[u8]) -> Value {
             let hq = payload.first().copied().unwrap_or(0) != 0;
             json!({
                 "highQuality": hq,
-                "gameMode": if hq { false } else { true },
-                "dualLink": if hq { false } else { true },
+                "gameMode": !hq,
+                "dualLink": !hq,
             })
         }
         UG1_CMD_PROMPT_LANG => json!({
@@ -703,7 +704,9 @@ fn parse_ug1_hardware_data(command_id: u8, payload: &[u8]) -> Value {
             })
         }
         4 => json!({ "gameMode": payload.first().copied().unwrap_or(0) != 0 }),
-        5 => json!({ "eqMode": payload.first().copied().map(eq_value_to_mode).unwrap_or("classic") }),
+        5 => {
+            json!({ "eqMode": payload.first().copied().map(eq_value_to_mode).unwrap_or("classic") })
+        }
         9 => json!({
             "findLeft": payload.first().copied().unwrap_or(0),
             "findRight": payload.get(1).copied().unwrap_or(0),
@@ -808,7 +811,10 @@ fn encode_ug2(command: &ProtocolCommand, payload: &Value, seq: u8) -> Result<Vec
         | ProtocolCommand::SetDualConnect { .. }
         | ProtocolCommand::SetSpatialAudio { .. }
         | ProtocolCommand::SetHighQuality { .. } => {
-            return Err(anyhow!("UG2 command `{}` is not implemented yet", command.name()));
+            return Err(anyhow!(
+                "UG2 command `{}` is not implemented yet",
+                command.name()
+            ));
         }
         ProtocolCommand::FactoryReset => (UG2_MAGIC_FACTORY_RESET, Vec::new()),
     };
@@ -1010,24 +1016,24 @@ fn normalize_anc_depth(depth: u8) -> &'static str {
 
 fn map_ug1_anc_mode_value(value: &str) -> u8 {
     match value {
-        "off" => 208, // 0xD0
+        "off" => 208,                          // 0xD0
         "transparent" | "transparency" => 210, // 0xD2
-        "deep" => 161, // 0xA1
-        "medium" => 177, // 0xB1
-        "light" => 193, // 0xC1
-        "adaptive" => 209, // 0xD1
+        "deep" => 161,                         // 0xA1
+        "medium" => 177,                       // 0xB1
+        "light" => 193,                        // 0xC1
+        "adaptive" => 209,                     // 0xD1
         _ => 209,
     }
 }
 
 fn map_ug1_anc_depth_value(value: &str) -> u8 {
     match value {
-        "deep" => 161, // 0xA1
-        "medium" => 177, // 0xB1
-        "light" => 193, // 0xC1
-        "adaptive" => 209, // 0xD1
+        "deep" => 161,                         // 0xA1
+        "medium" => 177,                       // 0xB1
+        "light" => 193,                        // 0xC1
+        "adaptive" => 209,                     // 0xD1
         "transparent" | "transparency" => 210, // 0xD2
-        "off" => 208, // 0xD0
+        "off" => 208,                          // 0xD0
         _ => 177,
     }
 }
@@ -1220,14 +1226,46 @@ mod tests {
     #[test]
     fn test_ug1_encode_switches() {
         let commands = [
-            (ProtocolCommand::SetGameMode { enabled: true }, UG1_CMD_GAME_MODE, vec![1]),
-            (ProtocolCommand::SetGameMode { enabled: false }, UG1_CMD_GAME_MODE, vec![0]),
-            (ProtocolCommand::SetDualConnect { enabled: true }, UG1_CMD_DUAL_CONNECT, vec![1]),
-            (ProtocolCommand::SetDualConnect { enabled: false }, UG1_CMD_DUAL_CONNECT, vec![0]),
-            (ProtocolCommand::SetSpatialAudio { enabled: true }, UG1_CMD_SPATIAL_AUDIO, vec![1]),
-            (ProtocolCommand::SetSpatialAudio { enabled: false }, UG1_CMD_SPATIAL_AUDIO, vec![0]),
-            (ProtocolCommand::SetHighQuality { enabled: true }, UG1_CMD_HIGH_QUALITY, vec![1]),
-            (ProtocolCommand::SetHighQuality { enabled: false }, UG1_CMD_HIGH_QUALITY, vec![0]),
+            (
+                ProtocolCommand::SetGameMode { enabled: true },
+                UG1_CMD_GAME_MODE,
+                vec![1],
+            ),
+            (
+                ProtocolCommand::SetGameMode { enabled: false },
+                UG1_CMD_GAME_MODE,
+                vec![0],
+            ),
+            (
+                ProtocolCommand::SetDualConnect { enabled: true },
+                UG1_CMD_DUAL_CONNECT,
+                vec![1],
+            ),
+            (
+                ProtocolCommand::SetDualConnect { enabled: false },
+                UG1_CMD_DUAL_CONNECT,
+                vec![0],
+            ),
+            (
+                ProtocolCommand::SetSpatialAudio { enabled: true },
+                UG1_CMD_SPATIAL_AUDIO,
+                vec![1],
+            ),
+            (
+                ProtocolCommand::SetSpatialAudio { enabled: false },
+                UG1_CMD_SPATIAL_AUDIO,
+                vec![0],
+            ),
+            (
+                ProtocolCommand::SetHighQuality { enabled: true },
+                UG1_CMD_HIGH_QUALITY,
+                vec![1],
+            ),
+            (
+                ProtocolCommand::SetHighQuality { enabled: false },
+                UG1_CMD_HIGH_QUALITY,
+                vec![0],
+            ),
         ];
 
         for (cmd, expected_cmd_id, expected_data) in commands {
@@ -1236,7 +1274,10 @@ mod tests {
             assert_eq!(encoded[0..3], UG1_REQ_HEADER);
             assert_eq!(encoded[3], expected_cmd_id);
             assert_eq!(encoded[4], expected_data.len() as u8);
-            assert_eq!(&encoded[5..5 + expected_data.len()], expected_data.as_slice());
+            assert_eq!(
+                &encoded[5..5 + expected_data.len()],
+                expected_data.as_slice()
+            );
         }
     }
 
@@ -1299,11 +1340,11 @@ mod tests {
         // [b0, b1, b2, anc, eq, dual_link, game_mode, high_quality, ...]
         let mut payload = vec![0u8; 30];
         payload[0] = 0xFF; // single headphone left invalid
-        payload[1] = 85;   // right = 85%
+        payload[1] = 85; // right = 85%
         payload[2] = 0xFF; // box invalid
-        payload[5] = 1;    // dual_link requested true
-        payload[6] = 1;    // game_mode requested true
-        payload[7] = 1;    // high_quality (LDAC) is ON
+        payload[5] = 1; // dual_link requested true
+        payload[6] = 1; // game_mode requested true
+        payload[7] = 1; // high_quality (LDAC) is ON
 
         let state = parse_ug1_device_state(&payload);
         assert_eq!(state["battery"]["right"], 85);
@@ -1329,4 +1370,3 @@ mod tests {
         assert_eq!(dual_link_data["dualLink"], true);
     }
 }
-
