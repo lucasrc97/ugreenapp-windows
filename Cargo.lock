@@ -2415,7 +2415,7 @@ dependencies = [
 
 [[package]]
 name = "ugreen-cli"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2428,7 +2428,7 @@ dependencies = [
 
 [[package]]
 name = "ugreen-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "libc",
@@ -2440,7 +2440,7 @@ dependencies = [
 
 [[package]]
 name = "ugreen-gui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "eframe",

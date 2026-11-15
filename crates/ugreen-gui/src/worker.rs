@@ -14,7 +14,7 @@ use ugreen_core::discovery::{self, BluetoothDevice};
 use ugreen_core::protocol::{DecodedFrame, ProtocolCommand, ProtocolType};
 use ugreen_core::transport::{PlatformTransport, Transport, TransportTarget};
 
-use crate::model::{AncChoice, HeadsetState, Setting, supported_protocol};
+use crate::model::{AncChoice, Feature, Features, HeadsetState, Setting, supported_protocol};
 
 /// RFCOMM channel tried first; the Windows transport falls back to SDP.
 const DEFAULT_RFCOMM_CHANNEL: u8 = 1;
@@ -33,6 +33,8 @@ pub enum Request {
     Connect(DeviceEntry),
     Refresh,
     Set(Setting),
+    /// Wipes the headset's settings. Only sent after the UI's confirmation.
+    FactoryReset,
     Disconnect,
 }
 
@@ -45,6 +47,11 @@ pub enum Event {
     State(HeadsetState),
     /// A refresh or change failed; the previous state is still shown.
     Failed(String),
+    /// The headset accepted a factory reset; it is no longer connected.
+    ResetDone,
+    /// The headset accepted a change that makes it drop the Bluetooth
+    /// connection (the text says which); it is no longer connected.
+    ConnectionDropped(String),
 }
 
 /// What the worker needs from the outside world.
@@ -90,7 +97,17 @@ pub struct DemoBackend {
     eq: String,
     language: String,
     volume: u8,
+    features: Features,
 }
+
+/// Feature flags of a headset fresh out of the box, for the demo.
+const DEMO_FEATURES: Features = Features {
+    game_mode: Some(false),
+    multipoint: Some(true),
+    spatial_audio: Some(false),
+    ldac: Some(false),
+    wear_detection: Some(false),
+};
 
 impl DemoBackend {
     pub fn new(delay: Duration) -> Self {
@@ -100,6 +117,7 @@ impl DemoBackend {
             eq: "treble".into(),
             language: "English".into(),
             volume: 9,
+            features: DEMO_FEATURES,
         }
     }
 }
@@ -127,14 +145,18 @@ impl Backend for DemoBackend {
             ProtocolCommand::QueryFirmware => json!({ "firmwareVersion": "0.0.0-demo" }),
             ProtocolCommand::QueryInfo => {
                 let (mode, depth) = self.anc.to_report();
-                json!({
+                let mut info = json!({
                     "battery": { "left": 90 },
                     "ancMode": mode,
                     "ancDepth": depth,
                     "eqMode": self.eq,
                     "promptLanguage": self.language,
                     "promptVolume": self.volume,
-                })
+                });
+                for feature in Feature::ALL {
+                    info[feature.report_key()] = json!(self.features.get(feature));
+                }
+                info
             }
             ProtocolCommand::SetAnc { mode, .. } => {
                 self.anc = AncChoice::from_protocol_mode(mode)
@@ -153,8 +175,22 @@ impl Backend for DemoBackend {
                 self.volume = *value;
                 json!({ "success": true })
             }
+            ProtocolCommand::FactoryReset => {
+                let delay = self.delay;
+                *self = Self::new(delay);
+                json!({})
+            }
             other => {
-                return Err(anyhow!("demo headset: `{}` is not available", other.name()));
+                let Some((feature, enabled)) = Feature::from_command(other) else {
+                    return Err(anyhow!("demo headset: `{}` is not available", other.name()));
+                };
+                self.features.set(feature, Some(enabled));
+                // Like the real one: LDAC switches game mode and multipoint off.
+                if self.features.ldac == Some(true) {
+                    self.features.game_mode = Some(false);
+                    self.features.multipoint = Some(false);
+                }
+                json!({ "success": true })
             }
         };
         Ok(DecodedFrame {
@@ -199,11 +235,34 @@ impl<B: Backend> Worker<B> {
                 Ok(state) => Event::State(state),
                 Err(error) => Event::Failed(format!("Could not read the headset: {error:#}")),
             },
+            Request::Set(Setting::Toggle(feature, enabled)) if feature.drops_connection() => {
+                let setting = Setting::Toggle(feature, enabled);
+                match self.send_change(&setting) {
+                    Ok(()) => {
+                        self.active_mac = None;
+                        Event::ConnectionDropped(setting.describe())
+                    }
+                    Err(error) => Event::Failed(format!(
+                        "Could not change {}: {error:#}",
+                        setting.describe()
+                    )),
+                }
+            }
             Request::Set(setting) => match self.apply(&setting) {
                 Ok(state) => Event::State(state),
                 Err(error) => Event::Failed(format!(
                     "Could not change {}: {error:#}",
                     setting.describe()
+                )),
+            },
+            Request::FactoryReset => match self.factory_reset() {
+                Ok(()) => {
+                    self.active_mac = None;
+                    Event::ResetDone
+                }
+                Err(error) => Event::Failed(format!(
+                    "Could not confirm the factory reset: {error:#}. \
+                     The headset may have reset anyway; reconnect to check."
                 )),
             },
             Request::Disconnect => {
@@ -265,12 +324,29 @@ impl<B: Backend> Worker<B> {
     /// Sends a change, then re-reads the headset so the UI shows what the
     /// headset actually stored rather than what was asked for.
     fn apply(&mut self, setting: &Setting) -> Result<HeadsetState> {
+        self.send_change(setting)?;
+        self.read_info()
+    }
+
+    /// Sends a change without reading the headset back.
+    fn send_change(&mut self, setting: &Setting) -> Result<()> {
         let mac = self.active_mac()?;
         let response = self.backend.send(&mac, &setting.command())?;
         if !response.success {
             return Err(anyhow!("the headset rejected the command"));
         }
-        self.read_info()
+        Ok(())
+    }
+
+    /// Sends the reset and nothing else: the headset is not read afterwards,
+    /// since it may be restarting.
+    fn factory_reset(&mut self) -> Result<()> {
+        let mac = self.active_mac()?;
+        let response = self.backend.send(&mac, &ProtocolCommand::FactoryReset)?;
+        if !response.success {
+            return Err(anyhow!("the headset rejected the command"));
+        }
+        Ok(())
     }
 }
 
@@ -372,6 +448,65 @@ mod tests {
         };
         assert_eq!(state.prompt_volume, Some(4));
         assert_eq!(state.anc, Some(AncChoice::Adaptive));
+    }
+
+    #[test]
+    fn toggles_are_read_back() {
+        let mut worker = demo_worker();
+        let state = connect(&mut worker);
+        assert_eq!(state.features, DEMO_FEATURES);
+        for feature in Feature::ALL.into_iter().filter(|f| !f.drops_connection()) {
+            for enabled in [true, false] {
+                let event = worker.handle(Request::Set(Setting::Toggle(feature, enabled)));
+                let Some(Event::State(state)) = event else {
+                    panic!("unexpected {event:?}");
+                };
+                assert_eq!(state.features.get(feature), Some(enabled));
+            }
+        }
+    }
+
+    #[test]
+    fn changing_ldac_drops_the_connection_and_excludes_game_mode_and_multipoint() {
+        let mut worker = demo_worker();
+        connect(&mut worker);
+        worker.handle(Request::Set(Setting::Toggle(Feature::GameMode, true)));
+        let event = worker.handle(Request::Set(Setting::Toggle(Feature::Ldac, true)));
+        assert!(
+            matches!(event, Some(Event::ConnectionDropped(_))),
+            "{event:?}"
+        );
+        // The headset is gone: nothing is read until a reconnect.
+        assert!(matches!(
+            worker.handle(Request::Refresh),
+            Some(Event::Failed(_))
+        ));
+        let features = connect(&mut worker).features;
+        assert_eq!(features.ldac, Some(true));
+        assert_eq!(features.game_mode, Some(false));
+        assert_eq!(features.multipoint, Some(false));
+    }
+
+    #[test]
+    fn factory_reset_restores_defaults_and_drops_the_connection() {
+        let mut worker = demo_worker();
+        connect(&mut worker);
+        worker.handle(Request::Set(Setting::Eq("bass")));
+        worker.handle(Request::Set(Setting::Toggle(Feature::SpatialAudio, true)));
+        assert_eq!(worker.handle(Request::FactoryReset), Some(Event::ResetDone));
+        // No longer connected...
+        assert!(matches!(
+            worker.handle(Request::Refresh),
+            Some(Event::Failed(_))
+        ));
+        assert!(matches!(
+            worker.handle(Request::FactoryReset),
+            Some(Event::Failed(_))
+        ));
+        // ...and back to defaults after reconnecting.
+        let state = connect(&mut worker);
+        assert_eq!(state.eq.as_deref(), Some("treble"));
+        assert_eq!(state.features, DEMO_FEATURES);
     }
 
     #[test]
