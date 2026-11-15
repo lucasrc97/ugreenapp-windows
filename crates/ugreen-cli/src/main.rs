@@ -223,30 +223,35 @@ enum Command {
     #[command(visible_aliases = ["wear", "ear-detect"])]
     SetWearDetection {
         /// true/false
+        #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },
     /// Enable or disable game mode (low latency)
     #[command(visible_aliases = ["game", "game-mode"])]
     SetGameMode {
         /// true/false
+        #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },
     /// Enable or disable dual connection (multipoint)
     #[command(visible_aliases = ["dual", "dual-connect", "multipoint"])]
     SetDualConnect {
         /// true/false
+        #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },
     /// Enable or disable spatial audio
     #[command(visible_aliases = ["spatial", "spatial-audio"])]
     SetSpatialAudio {
         /// true/false
+        #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },
     /// Enable or disable high quality decoding (LDAC)
     #[command(visible_aliases = ["hq", "ldac", "high-quality"])]
     SetHighQuality {
         /// true/false
+        #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },
     /// Perform a factory reset of the active device
