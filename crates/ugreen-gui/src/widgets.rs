@@ -542,6 +542,29 @@ pub fn pill_button(ui: &mut Ui, text: &str, ink: Color32, fill: Color32, width: 
     clickable(ui, response)
 }
 
+/// A gear, for the button that opens the settings.
+pub fn gear_button(ui: &mut Ui) -> Response {
+    let palette = Palette::for_ui(ui);
+    let (rect, response) = ui.allocate_exact_size(vec2(32.0, 32.0), Sense::click());
+    let ink = if response.hovered() {
+        palette.accent
+    } else {
+        palette.text
+    };
+    let center = rect.center();
+    let painter = ui.painter();
+    for tooth in 0..8 {
+        let angle = PI * tooth as f32 / 4.0;
+        let direction = vec2(angle.cos(), angle.sin());
+        painter.line_segment(
+            [center + direction * 7.0, center + direction * 10.0],
+            Stroke::new(3.4, ink),
+        );
+    }
+    painter.circle_stroke(center, 6.0, Stroke::new(3.0, ink));
+    clickable(ui, response)
+}
+
 /// One tab of the bottom bar.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TabIcon {

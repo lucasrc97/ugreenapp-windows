@@ -104,7 +104,13 @@ Good to know:
 - **Prompt's volume** changes the spoken announcements, not the music.
 - The phone app's **Control** tab (ANC button actions), the **Ringtone**
   broadcast voice and renaming the device are not available here.
-- The **theme** is remembered between runs.
+- The **theme** and the window's size and position are remembered between
+  runs. The gear at the top right of the device list opens the app's
+  **Settings** (theme, debug console) without a headset.
+- When something fails, the app shows a short plain message. The technical
+  details, including the raw bytes exchanged with the headset, are in the
+  **Debug console**: a separate window opened from Settings, from the More
+  tab or with the *Details* link next to the message.
 - After each command the controls pause for **one second**. Sending changes in
   very quick succession froze the test headset once, so the app paces them.
 - If the headset is off or out of range, a command can take around 20 seconds

@@ -1,4 +1,5 @@
-//! The one preference the GUI keeps between runs: the colour theme.
+//! What the GUI keeps between runs: the colour theme (here) and the window's
+//! size and position (saved by eframe in the same directory).
 
 use std::path::PathBuf;
 
@@ -47,9 +48,9 @@ impl ThemeChoice {
     }
 }
 
-/// `%APPDATA%\ugreen-gui\theme` on Windows, `~/.config/ugreen-gui/theme`
-/// (or under `$XDG_CONFIG_HOME`) elsewhere.
-fn theme_file() -> Option<PathBuf> {
+/// `%APPDATA%\ugreen-gui` on Windows, `~/.config/ugreen-gui` (or under
+/// `$XDG_CONFIG_HOME`) elsewhere.
+fn settings_dir() -> Option<PathBuf> {
     let non_empty = |name: &str| std::env::var_os(name).filter(|value| !value.is_empty());
     let base = if cfg!(target_os = "windows") {
         PathBuf::from(non_empty("APPDATA")?)
@@ -58,7 +59,16 @@ fn theme_file() -> Option<PathBuf> {
     } else {
         PathBuf::from(non_empty("HOME")?).join(".config")
     };
-    Some(base.join("ugreen-gui").join("theme"))
+    Some(base.join("ugreen-gui"))
+}
+
+fn theme_file() -> Option<PathBuf> {
+    Some(settings_dir()?.join("theme"))
+}
+
+/// Where eframe saves the window's size and position.
+pub fn window_file() -> Option<PathBuf> {
+    Some(settings_dir()?.join("window.ron"))
 }
 
 /// The saved theme; `System` when nothing (readable) was saved.
