@@ -21,12 +21,15 @@ Windows support and the GUI. See [Credits](#credits).
 |---|---|---|
 | List paired headsets and connect | ✅ | ✅ |
 | Firmware version and battery level | ✅ | ✅ |
-| Noise control: off, transparency, noise cancelling (light / medium / deep / adaptive) | ✅ | ✅ |
+| Noise cancelling: on, off, ambient sound; modes adaptive / gentle / general / ultra | ✅ | ✅ |
 | Equalizer presets | ✅ | ✅ |
-| Voice prompt language and volume | ✅ | ✅ |
-| Game mode, multipoint, spatial audio, LDAC, wear detection | — | ✅ |
+| Broadcast voice (prompt language) and prompt volume | ✅ | ✅ |
+| Game mode, dual link (multipoint), spatial sound effects | ✅ | ✅ |
+| Hi-Res audio decoding (LDAC) | shown, not changeable | ✅ (breaks the connection, see below) |
+| Wear detection | only for models that have it | ✅ |
+| Light, dark or system theme | ✅ | — |
 | List the headset's RFCOMM services, dump raw bytes | — | ✅ |
-| Factory reset | never | behind an explicit flag |
+| Factory reset | behind a confirmation | behind an explicit flag |
 
 ## Status
 
@@ -36,7 +39,10 @@ Tested on real hardware: **HiTune Max5c, firmware 0.5.7, on Windows**.
 |---|---|
 | Windows: scan, info, firmware, noise control, EQ, prompt language and volume | Works on the headset above, from both the GUI and the CLI |
 | Windows: error messages for Bluetooth off and headset off | Checked |
-| Windows: game mode, multipoint, spatial audio, LDAC, wear detection | Present in the CLI, **not tested** in this fork |
+| Windows: game mode, multipoint, spatial audio | Work on the headset above, from the GUI |
+| Windows: LDAC | The headset accepts the change, but the Bluetooth connection then breaks: no audio until the adapter is replugged and the headset paired again. **Disabled in the GUI** for now |
+| Wear detection | The Max5c has no such sensor and stops answering when sent the command. **Disabled in the GUI** for it |
+| Windows: factory reset | Present in the GUI and the CLI, **not tested** on hardware in this fork |
 | Windows: SDP fallback when channel 1 is refused | Implemented, **never triggered** on the test headset |
 | Linux | The original transport is kept as it was upstream. It still builds and the unit tests pass, but it was **not re-tested on hardware** in this fork |
 | Other UGREEN models (Max5, Max6, H6 Pro, T6) | Known to the CLI catalog from upstream, **untested**. The GUI only accepts the Max5c |
@@ -51,25 +57,54 @@ Prebuilt Windows executables are on the
 - `ugreen-cli.exe` — the command line
 
 They are plain portable `.exe` files: no installer, nothing to configure.
-They are not code-signed, so Windows SmartScreen may ask for confirmation the
-first time.
+They are not code-signed, so Windows may get in the way:
+
+- **SmartScreen** may ask for confirmation the first time. Choose *More info*,
+  then *Run anyway*.
+- **Smart App Control** (Windows 11) may block them outright, with no option
+  to continue, because they come from an unknown publisher. Started from WSL,
+  a blocked executable fails with `Invalid argument`. The decision is made
+  per file, so one build can be blocked and the next one allowed. The ways
+  around it are to build from source, or to turn Smart App Control off in
+  *Windows Security → App & browser control* (Windows does not let you turn
+  it back on without reinstalling).
 
 ## Using the GUI
 
+The screens follow the layout and the names of the UGREEN phone app.
+
 1. Pair the headset in the Windows Bluetooth settings, as you would for audio.
    The app never pairs or discovers anything by itself.
-2. Run `ugreen-gui.exe`. Paired devices are listed; a supported headset is
-   selected automatically, anything else is greyed out.
-3. Click **Connect**.
+2. Run `ugreen-gui.exe`. **My Devices** lists the paired devices; anything
+   that is not a supported headset is greyed out.
+3. Click the headset to connect.
 4. Change what you want. After every change the app reads the headset again,
    so the window always shows what the headset actually stored.
 
+A connected headset has two tabs:
+
+- **Device**: battery, **Noise cancelling control** (On, Off, Ambient sound,
+  and the **Noise cancelling mode**: Adaptive, Gentle, General, Ultra),
+  **Equalizer**, **Game mode**, **Spatial sound effects**, **Dual link**
+  (multipoint) and **Hi-Res audio decoding** (LDAC).
+- **More**: device name, firmware version, **Broadcast voice** (language and
+  prompt volume), **Theme** (System, Light, Dark), **Factory reset** and
+  **Disconnect**.
+
 Good to know:
 
-- **Noise control** has two rows. *Mode* picks Off, Transparency or Noise
-  cancelling; *Intensity* (Light, Medium, Deep, Adaptive) only applies while
-  noise cancelling is on.
-- **Voice prompt volume** changes the spoken announcements, not the music.
+- **Noise cancelling mode** can only be picked while noise cancelling is on.
+- **Game mode** and **Dual link** cannot be switched on while Hi-Res audio
+  decoding is on, because the headset refuses them.
+- **Hi-Res audio decoding** is shown but cannot be changed: on Windows the
+  change breaks the Bluetooth connection. Change it in the UGREEN phone app.
+- **Wear detection** has no row for the Max5c, which has no such sensor.
+- **Factory reset** asks for confirmation. Afterwards the app goes back to
+  the device list, and the headset has to be paired again.
+- **Prompt's volume** changes the spoken announcements, not the music.
+- The phone app's **Control** tab (ANC button actions), the **Ringtone**
+  broadcast voice and renaming the device are not available here.
+- The **theme** is remembered between runs.
 - After each command the controls pause for **one second**. Sending changes in
   very quick succession froze the test headset once, so the app paces them.
 - If the headset is off or out of range, a command can take around 20 seconds
