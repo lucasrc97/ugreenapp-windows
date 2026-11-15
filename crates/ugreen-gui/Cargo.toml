@@ -2,9 +2,11 @@
 name = "ugreen-gui"
 version.workspace = true
 edition.workspace = true
+build = "build.rs"
 
 [dependencies]
 anyhow.workspace = true
+log = "0.4"
 serde_json.workspace = true
 ugreen-core.workspace = true
-eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "x11", "wayland"] }
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow", "persistence", "x11", "wayland"] }

@@ -42,6 +42,12 @@ pub struct App {
     /// Neutral message for the status bar (for example after a reset).
     notice: Option<String>,
     theme: ThemeChoice,
+    /// The Settings page opened from the device list (no headset needed).
+    settings_open: bool,
+    /// The dialog that picks the theme.
+    theme_sheet: bool,
+    /// The Debug console, a window of its own.
+    debug_open: bool,
     /// Screenshot tour of every screen (debug builds, `UGREEN_GUI_TOUR`).
     #[cfg(debug_assertions)]
     pub tour: Option<tour::Tour>,
@@ -61,7 +67,6 @@ enum Page {
     Equalizer,
     Feature(Feature),
     BroadcastVoice,
-    Theme,
 }
 
 /// A dialog over the current page.
@@ -80,6 +85,9 @@ enum Action {
     Leave,
     FactoryReset,
     SetTheme(ThemeChoice),
+    /// Opens the dialog that picks the theme.
+    ChooseTheme,
+    OpenDebugConsole,
 }
 
 struct Connection {
@@ -156,6 +164,9 @@ impl App {
             error: None,
             notice: None,
             theme,
+            settings_open: false,
+            theme_sheet: false,
+            debug_open: false,
             #[cfg(debug_assertions)]
             tour: None,
         };
@@ -166,10 +177,12 @@ impl App {
     fn request(&mut self, request: Request, activity: &str) {
         self.error = None;
         self.notice = None;
+        log::info!("request: {request:?}");
         if self.requests.send(request).is_ok() {
             self.busy = Some(activity.to_string());
         } else {
-            self.error = Some("The Bluetooth worker stopped; restart the app.".into());
+            log::error!("the Bluetooth worker thread is gone");
+            self.error = Some("Something stopped working. Close the app and open it again.".into());
         }
     }
 
@@ -190,6 +203,11 @@ impl App {
             if !matches!(event, Event::Devices(_)) {
                 self.last_command_done = Some(Instant::now());
             }
+            match &event {
+                // Logged as errors below, where they are handled.
+                Event::Devices(Err(_)) | Event::ConnectFailed(_) | Event::Failed { .. } => {}
+                other => log::info!("event: {other:?}"),
+            }
             match event {
                 Event::Devices(Ok(devices)) => {
                     self.scanned_once = true;
@@ -198,28 +216,42 @@ impl App {
                 Event::Devices(Err(error)) => {
                     self.scanned_once = true;
                     self.devices.clear();
-                    self.error = Some(error);
+                    log::error!("could not list the paired devices: {error}");
+                    self.error = Some(
+                        "Could not list the Bluetooth devices. Check that Bluetooth is \
+                         switched on, then press Refresh."
+                            .into(),
+                    );
                 }
                 Event::Connected(device, state) => {
                     self.connection = Some(Connection::new(device, state));
                 }
                 Event::ConnectFailed(error) => {
                     self.connection = None;
-                    self.error = Some(error);
+                    log::error!("could not connect: {error}");
+                    self.error = Some(
+                        "Could not connect to the headset. Check that it is switched on \
+                         and connected to this computer, then try again."
+                            .into(),
+                    );
                 }
                 Event::State(state) => {
                     if let Some(connection) = &mut self.connection {
                         connection.update(state);
                     }
                 }
-                Event::Failed(error) => {
+                Event::Failed { what, detail } => {
                     if let Some(connection) = &mut self.connection {
                         // Put the slider back on the last value read.
                         if let Some(volume) = connection.state.prompt_volume {
                             connection.volume_draft = volume;
                         }
                     }
-                    self.error = Some(error);
+                    log::error!("{what}: {detail}");
+                    self.error = Some(format!(
+                        "{what}. Check that the headset is switched on and in range, \
+                         then try again."
+                    ));
                 }
                 Event::ConnectionDropped(change) => {
                     self.connection = None;
@@ -242,12 +274,13 @@ impl App {
     }
 
     /// The line above the tabs: only there while something is worth saying.
+    /// Returns whether the "Details" link of a problem was clicked.
     fn status_bar(&self, ui: &mut egui::Ui) -> bool {
         let palette = Palette::for_ui(ui);
         let (spinner, text, color) = if let Some(activity) = &self.busy {
             (true, activity.as_str(), palette.weak)
         } else if let Some(error) = &self.error {
-            (false, error.as_str(), palette.danger)
+            (false, error.as_str(), palette.text)
         } else if let Some(notice) = &self.notice {
             (false, notice.as_str(), palette.text)
         } else if self.cooldown_left().is_some() {
@@ -255,14 +288,22 @@ impl App {
         } else {
             return false;
         };
-        // Wrapped, so a long error message is never cut off.
+        let mut details = false;
+        // Wrapped, so a long message is never cut off.
         ui.horizontal_wrapped(|ui| {
             if spinner {
                 ui.spinner();
             }
             ui.label(RichText::new(text).color(color).size(13.5));
+            if self.busy.is_none() && self.error.is_some() {
+                let link = RichText::new("Details").color(palette.accent).size(13.5);
+                details = ui
+                    .add(egui::Button::new(link).frame(false))
+                    .on_hover_text("Open the debug console")
+                    .clicked();
+            }
         });
-        true
+        details
     }
 
     fn has_status(&self) -> bool {
@@ -279,6 +320,9 @@ impl App {
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("My Devices({})", self.devices.len())).size(26.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::gear_button(ui).on_hover_text("Settings").clicked() {
+                    self.settings_open = true;
+                }
                 let refresh =
                     egui::Button::new(RichText::new("Refresh").color(palette.accent)).frame(false);
                 if ui.add_enabled(idle, refresh).clicked() {
@@ -345,6 +389,8 @@ impl App {
                 ctx.set_theme(theme.preference());
                 settings::save_theme(theme);
             }
+            Action::ChooseTheme => self.theme_sheet = true,
+            Action::OpenDebugConsole => self.debug_open = true,
         }
     }
 }
@@ -400,7 +446,6 @@ fn headset_screen(
         (_, Page::Equalizer) => equalizer_page(ui, connection, idle),
         (_, Page::Feature(feature)) => feature_page(ui, connection, feature, idle),
         (_, Page::BroadcastVoice) => broadcast_voice_page(ui, connection, idle),
-        (_, Page::Theme) => theme_page(ui, connection, theme),
         (Tab::Device, Page::Main) => device_tab(ui, connection, idle),
         (Tab::More, Page::Main) => more_tab(ui, connection, theme),
     }
@@ -620,7 +665,11 @@ fn more_tab(ui: &mut egui::Ui, connection: &mut Connection, theme: ThemeChoice) 
         }
         widgets::divider(ui);
         if widgets::nav_row(ui, "Theme", Some(theme.label()), true).clicked() {
-            connection.page = Page::Theme;
+            action = Some(Action::ChooseTheme);
+        }
+        widgets::divider(ui);
+        if widgets::nav_row(ui, "Debug console", None, true).clicked() {
+            action = Some(Action::OpenDebugConsole);
         }
         widgets::divider(ui);
         if widgets::nav_row(ui, "Factory reset", None, true).clicked() {
@@ -682,14 +731,39 @@ fn broadcast_voice_page(
     action
 }
 
-fn theme_page(
-    ui: &mut egui::Ui,
-    connection: &mut Connection,
-    theme: ThemeChoice,
-) -> Option<Action> {
+/// The app's own settings, opened with the gear of the device list.
+/// Returns `(back clicked, action)`.
+fn settings_page(ui: &mut egui::Ui, theme: ThemeChoice) -> (bool, Option<Action>) {
     let mut action = None;
-    sub_page_header(ui, connection, "Theme");
+    let (back, _) = widgets::header(ui, "Settings", None);
+    ui.add_space(6.0);
     widgets::card(ui, |ui| {
+        if widgets::nav_row(ui, "Theme", Some(theme.label()), true).clicked() {
+            action = Some(Action::ChooseTheme);
+        }
+        widgets::divider(ui);
+        if widgets::nav_row(ui, "Debug console", None, true).clicked() {
+            action = Some(Action::OpenDebugConsole);
+        }
+    });
+    widgets::notes(
+        ui,
+        &[
+            "The debug console is a separate window that shows what the app asks of \
+           the headset and what comes back, for tracking down a problem.",
+        ],
+    );
+    (back, action)
+}
+
+/// The dialog that picks the theme. Returns `(close, action)`; Esc or a
+/// click outside closes it too.
+fn theme_sheet(ctx: &egui::Context, theme: ThemeChoice) -> (bool, Option<Action>) {
+    let mut action = None;
+    let mut close = false;
+    let modal = egui::Modal::new(egui::Id::new("theme_sheet")).show(ctx, |ui| {
+        ui.set_width(310.0);
+        widgets::card_title(ui, "Theme");
         for (index, choice) in ThemeChoice::ALL.into_iter().enumerate() {
             if index > 0 {
                 widgets::divider(ui);
@@ -697,13 +771,15 @@ fn theme_page(
             let description =
                 (choice == ThemeChoice::System).then_some("Follow the system setting");
             let selected = choice == theme;
-            if widgets::option_row(ui, choice.label(), description, selected).clicked() && !selected
-            {
-                action = Some(Action::SetTheme(choice));
+            if widgets::option_row(ui, choice.label(), description, selected).clicked() {
+                if !selected {
+                    action = Some(Action::SetTheme(choice));
+                }
+                close = true;
             }
         }
     });
-    action
+    (close || modal.should_close(), action)
 }
 
 /// The dialog open over the page, if any. Esc or a click outside closes it.
@@ -786,6 +862,12 @@ fn cooldown_remaining(elapsed: Duration) -> Option<Duration> {
 }
 
 impl eframe::App for App {
+    /// Only the window's size and position are kept between runs, not
+    /// egui's own state (scroll positions and the like).
+    fn persist_egui_memory(&self) -> bool {
+        false
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_events();
         #[cfg(debug_assertions)]
@@ -833,7 +915,9 @@ impl eframe::App for App {
                 .frame(strip)
                 .show_separator_line(false)
                 .show(ctx, |ui| {
-                    self.status_bar(ui);
+                    if self.status_bar(ui) {
+                        self.debug_open = true;
+                    }
                 });
         }
 
@@ -855,6 +939,11 @@ impl eframe::App for App {
                     Some(connection) => {
                         action = headset_screen(ui, connection, idle, self.theme);
                     }
+                    None if self.settings_open => {
+                        let (back, from_page) = settings_page(ui, self.theme);
+                        self.settings_open = !back;
+                        action = from_page;
+                    }
                     None => self.devices_screen(ui),
                 }
             });
@@ -865,8 +954,18 @@ impl eframe::App for App {
         {
             action = Some(from_sheet);
         }
+        if self.theme_sheet {
+            let (close, from_sheet) = theme_sheet(ctx, self.theme);
+            self.theme_sheet = !close;
+            if from_sheet.is_some() {
+                action = from_sheet;
+            }
+        }
         if let Some(action) = action {
             self.handle(action, ctx);
+        }
+        if self.debug_open {
+            crate::debug::show(ctx, &mut self.debug_open);
         }
     }
 }

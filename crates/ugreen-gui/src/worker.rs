@@ -46,7 +46,12 @@ pub enum Event {
     /// State re-read from the headset (after a refresh or a change).
     State(HeadsetState),
     /// A refresh or change failed; the previous state is still shown.
-    Failed(String),
+    /// `what` is for the user, `detail` (the error itself) for the debug
+    /// console.
+    Failed {
+        what: String,
+        detail: String,
+    },
     /// The headset accepted a factory reset; it is no longer connected.
     ResetDone,
     /// The headset accepted a change that makes it drop the Bluetooth
@@ -233,7 +238,7 @@ impl<B: Backend> Worker<B> {
             },
             Request::Refresh => match self.read_info() {
                 Ok(state) => Event::State(state),
-                Err(error) => Event::Failed(format!("Could not read the headset: {error:#}")),
+                Err(error) => failed("Could not read the headset", error),
             },
             Request::Set(Setting::Toggle(feature, enabled)) if feature.drops_connection() => {
                 let setting = Setting::Toggle(feature, enabled);
@@ -242,28 +247,22 @@ impl<B: Backend> Worker<B> {
                         self.active_mac = None;
                         Event::ConnectionDropped(setting.describe())
                     }
-                    Err(error) => Event::Failed(format!(
-                        "Could not change {}: {error:#}",
-                        setting.describe()
-                    )),
+                    Err(error) => failed(format!("Could not change {}", setting.describe()), error),
                 }
             }
             Request::Set(setting) => match self.apply(&setting) {
                 Ok(state) => Event::State(state),
-                Err(error) => Event::Failed(format!(
-                    "Could not change {}: {error:#}",
-                    setting.describe()
-                )),
+                Err(error) => failed(format!("Could not change {}", setting.describe()), error),
             },
             Request::FactoryReset => match self.factory_reset() {
                 Ok(()) => {
                     self.active_mac = None;
                     Event::ResetDone
                 }
-                Err(error) => Event::Failed(format!(
-                    "Could not confirm the factory reset: {error:#}. \
-                     The headset may have reset anyway; reconnect to check."
-                )),
+                Err(error) => failed(
+                    "Could not confirm the factory reset; the headset may have reset anyway",
+                    error,
+                ),
             },
             Request::Disconnect => {
                 self.active_mac = None;
@@ -352,6 +351,13 @@ impl<B: Backend> Worker<B> {
 
 fn describe(error: anyhow::Error) -> String {
     format!("{error:#}")
+}
+
+fn failed(what: impl Into<String>, error: anyhow::Error) -> Event {
+    Event::Failed {
+        what: what.into(),
+        detail: describe(error),
+    }
 }
 
 /// Starts the worker thread. `make_backend` runs on that thread, because the
@@ -479,7 +485,7 @@ mod tests {
         // The headset is gone: nothing is read until a reconnect.
         assert!(matches!(
             worker.handle(Request::Refresh),
-            Some(Event::Failed(_))
+            Some(Event::Failed { .. })
         ));
         let features = connect(&mut worker).features;
         assert_eq!(features.ldac, Some(true));
@@ -497,11 +503,11 @@ mod tests {
         // No longer connected...
         assert!(matches!(
             worker.handle(Request::Refresh),
-            Some(Event::Failed(_))
+            Some(Event::Failed { .. })
         ));
         assert!(matches!(
             worker.handle(Request::FactoryReset),
-            Some(Event::Failed(_))
+            Some(Event::Failed { .. })
         ));
         // ...and back to defaults after reconnecting.
         let state = connect(&mut worker);
@@ -514,13 +520,13 @@ mod tests {
         let mut worker = demo_worker();
         assert!(matches!(
             worker.handle(Request::Refresh),
-            Some(Event::Failed(_))
+            Some(Event::Failed { .. })
         ));
         connect(&mut worker);
         assert_eq!(worker.handle(Request::Disconnect), None);
         assert!(matches!(
             worker.handle(Request::Set(Setting::Eq("bass"))),
-            Some(Event::Failed(_))
+            Some(Event::Failed { .. })
         ));
     }
 

@@ -25,7 +25,11 @@ fn show(app: &mut App, tab: Tab, page: Page, sheet: Option<Sheet>) {
 
 const STEPS: &[(&str, Setup)] = &[
     ("01-devices", |_, _| {}),
+    ("01b-settings", |app, _| app.settings_open = true),
+    ("01c-settings-theme", |app, _| app.theme_sheet = true),
     ("02-device", |app, _| {
+        app.settings_open = false;
+        app.theme_sheet = false;
         if let Some(device) = app.devices.first().cloned() {
             app.request(Request::Connect(device), "Connecting…");
         }
@@ -52,8 +56,12 @@ const STEPS: &[(&str, Setup)] = &[
     ("10-factory-reset", |app, _| {
         show(app, Tab::More, Page::Main, Some(Sheet::FactoryReset));
     }),
-    ("11-theme", |app, _| show(app, Tab::More, Page::Theme, None)),
+    ("11-theme", |app, _| {
+        show(app, Tab::More, Page::Main, None);
+        app.theme_sheet = true;
+    }),
     ("12-dark-device", |app, ctx| {
+        app.theme_sheet = false;
         app.theme = ThemeChoice::Dark;
         ctx.set_theme(egui::ThemePreference::Dark);
         show(app, Tab::Device, Page::Main, None);
@@ -64,6 +72,8 @@ const STEPS: &[(&str, Setup)] = &[
     ("14-dark-equalizer", |app, _| {
         show(app, Tab::Device, Page::Equalizer, None);
     }),
+    // Only the main window is captured; this checks the console opens.
+    ("15-debug-console-open", |app, _| app.debug_open = true),
 ];
 
 /// Frames to let animations settle before a screenshot.
